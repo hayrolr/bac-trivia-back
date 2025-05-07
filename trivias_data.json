@@ -1,0 +1,74 @@
+[
+  {
+    "category": "Ahorro",
+    "questionText": "¿Principal beneficio del ahorro programado?",
+    "options": ["Intereses altos", "Acceso a créditos", "Cumplir metas específicas", "Pagos internacionales"],
+    "correctAnswerIndex": 2
+  },
+  {
+    "category": "Ahorro",
+    "questionText": "¿Se puede retirar de ahorro programado antes del plazo?",
+    "options": ["Sí, sin penalización", "Sí, con penalización", "No, es imposible", "Solo con orden judicial"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Ahorro",
+    "questionText": "¿Qué es 'Ahorro a la Vista'?",
+    "options": ["Meta definida", "Disponibilidad inmediata", "Solo para viviendas", "Con seguro de vida"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Tarjeta",
+    "questionText": "¿Puntos BAC por dólar con Tarjeta Gold?",
+    "options": ["1 punto", "2 puntos", "1.5 puntos", "Depende del comercio"],
+    "correctAnswerIndex": 0
+  },
+  {
+    "category": "Tarjeta",
+    "questionText": "¿Las tarjetas BAC tienen seguro de viaje?",
+    "options": ["Todas", "Solo Platinum y Black", "Ninguna", "Solo si se paga extra"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Tarjeta",
+    "questionText": "¿Qué es el 'Pago Mínimo' de una tarjeta de crédito?",
+    "options": ["El total de la deuda", "Un abono para no generar intereses", "La cantidad mínima requerida para mantener la cuenta al día", "Un pago opcional"],
+    "correctAnswerIndex": 2
+  },
+  {
+    "category": "Casa",
+    "questionText": "¿Plazo máximo para préstamo hipotecario BAC?",
+    "options": ["15 años", "20 años", "25 años", "30 años"],
+    "correctAnswerIndex": 3
+  },
+  {
+    "category": "Casa",
+    "questionText": "¿Qué es el 'enganche' o 'prima' en un crédito hipotecario?",
+    "options": ["El seguro de la propiedad", "El monto inicial que el cliente aporta", "Los gastos de cierre", "La tasa de interés"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Casa",
+    "questionText": "¿Es obligatorio el seguro de vida para un préstamo hipotecario?",
+    "options": ["No, es opcional", "Sí, siempre", "Solo para montos altos", "Depende del banco"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Carro",
+    "questionText": "¿BAC financia autos usados?",
+    "options": ["Sí, hasta 5 años antigüedad", "Sí, hasta 7 años antigüedad", "No, solo nuevos", "Sí, sin límite antigüedad"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Carro",
+    "questionText": "¿Qué es un 'leasing' de auto?",
+    "options": ["Compra directa", "Alquiler con opción a compra", "Préstamo prendario", "Seguro vehicular"],
+    "correctAnswerIndex": 1
+  },
+  {
+    "category": "Carro",
+    "questionText": "¿El seguro vehicular es obligatorio al financiar un auto?",
+    "options": ["No, es opcional", "Solo el primer año", "Sí, usualmente por todo el plazo del crédito", "Solo para autos nuevos"],
+    "correctAnswerIndex": 2
+  }
+]

@@ -26,3 +26,5 @@ yarn-error.log*
 
 # Environment files (local configs)
 /.env.*
+
+bactrivia-firebase-adminsdk-fbsvc-d9f5f5d771.json
