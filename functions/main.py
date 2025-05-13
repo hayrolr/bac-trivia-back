@@ -1,6 +1,8 @@
 # main.py
 import random
 import datetime
+
+import bcrypt
 import firebase_admin
 from firebase_admin import firestore, credentials
 from google.cloud.firestore_v1.client import Client as FirestoreClient
@@ -265,7 +267,7 @@ def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
 
     except Exception as e:
         print(f"ERROR in getTriviaQuestion: {e}")
-        import traceback;
+        import traceback
         traceback.print_exc()
         return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
 
@@ -390,6 +392,98 @@ def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
 
     except Exception as e:
         print(f"ERROR in submitTriviaAnswer: {e}")
-        import traceback;
+        import traceback
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+# --- NUEVA Cloud Function: loginAdmin ---
+@https_fn.on_request()
+def loginAdmin(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    try:
+        req_data = req.get_json(silent=True)
+        if not req_data:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
+
+        admin_id_login = req_data.get('adminId')
+        password_login = req_data.get('password')
+
+        if not all([admin_id_login, password_login]):
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing adminId or password"}, 400)
+
+        admin_doc_ref = db.collection('admins').document(admin_id_login)
+        admin_doc = admin_doc_ref.get()
+
+        if not admin_doc.exists:
+            return _add_cors_headers({"error": "Unauthorized", "message": "Admin ID not found"}, 401)
+
+        admin_data = admin_doc.to_dict()
+        hashed_password_stored = admin_data.get('hashedPassword')
+
+        if not hashed_password_stored:
+            print(f"ERROR: Admin {admin_id_login} has no hashedPassword stored in Firestore.")
+            return _add_cors_headers({"error": "Server Error", "message": "Admin account misconfiguration"}, 500)
+
+        # Verificar la contraseña hasheada
+        if bcrypt.checkpw(password_login.encode('utf-8'), hashed_password_stored.encode('utf-8')):
+            # Contraseña correcta
+            return _add_cors_headers({
+                "message": "Admin login successful",
+                "adminId": admin_id_login,
+                "nombre": admin_data.get("nombre")
+                # No enviar token JWT por simplicidad en este MVP, el frontend manejará un flag
+            }, 200)
+        else:
+            # Contraseña incorrecta
+            return _add_cors_headers({"error": "Unauthorized", "message": "Invalid admin credentials"}, 401)
+
+    except Exception as e:
+        print(f"ERROR in loginAdmin: {e}")
+        import traceback
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+# --- NUEVA Cloud Function: getUsersWithScores ---
+@https_fn.on_request()
+def getUsersWithScores(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    # TODO: Añadir autenticación/autorización para esta función (ej. verificar token de admin)
+    # Por ahora, la dejamos abierta para la prueba del MVP.
+
+    try:
+        users_ref = db.collection('users')
+        all_users_docs = users_ref.stream()  # Obtener todos los documentos
+
+        users_list = []
+        for doc in all_users_docs:
+            user_data = doc.to_dict()
+            users_list.append({
+                "firestoreId": doc.id,  # ID del documento, útil para futuras ediciones
+                "usuarioId": user_data.get("usuarioId"),
+                "nombre": user_data.get("nombre"),
+                "apellido": user_data.get("apellido"),
+                "cedula": user_data.get("cedula"),
+                "puntos": user_data.get("puntos", 0),
+                # "itemsCollectedCount": len(user_data.get("itemsCollected", [])), # Opcional
+            })
+
+        # Ordenar por puntos descendente (opcional)
+        users_list_sorted = sorted(users_list, key=lambda u: u['puntos'], reverse=True)
+
+        return _add_cors_headers(users_list_sorted, 200)
+
+    except Exception as e:
+        print(f"ERROR in getUsersWithScores: {e}")
+        import traceback
         traceback.print_exc()
         return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
