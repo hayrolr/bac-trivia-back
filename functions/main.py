@@ -321,5 +321,5 @@ def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
 
     except Exception as e:
         print(f"ERROR in getTriviaQuestion: {e}")
-        # import traceback; print(traceback.format_exc())
+        import traceback; print(traceback.format_exc())
         return _add_cors_headers({"error": "Internal Server Error"}, 500)
