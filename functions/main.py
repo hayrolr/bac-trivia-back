@@ -1,24 +1,26 @@
-import random # Para seleccionar pregunta aleatoria
+# main.py
+import random
 import datetime
 import firebase_admin
-from firebase_admin import firestore
+from firebase_admin import firestore, credentials
 from google.cloud.firestore_v1.client import Client as FirestoreClient
 from google.cloud.firestore_v1.transaction import Transaction, transactional
-from flask import Flask, request, jsonify # Flask solo para jsonify si no se usa como router
-from firebase_functions import https_fn
-import re # Para limpiar nombre
+from google.cloud.firestore_v1.base_query import FieldFilter  # Importar para queries más complejas si es necesario
 
+from flask import Flask, request, jsonify  # Flask solo para jsonify si no se usa como router
+from firebase_functions import https_fn  # , options as fn_options # Para configurar CORS a nivel de función
+import re
 
 # --- Configuración de CORS ---
-# Para desarrollo, '*' temporal.
-# Para producción, se deben especificar los dominios:
-# ALLOWED_ORIGINS = ["http://localhost:3000", "https://app-en-vercel.vercel.app"]
-ALLOWED_ORIGINS = "*" # Temporalmente para desarrollo y pruebas
+# fn_options.set_global_options(cors=fn_options.CorsOptions(cors_origins="*", cors_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]))
+# Alternativamente, manejar manualmente como ya está implementado:
+ALLOWED_ORIGINS = "*"  # Temporalmente para desarrollo y pruebas
 
-
-# Inicialization
+# Inicialización
 try:
-    firebase_admin.initialize_app()
+    # cred = credentials.ApplicationDefault() # Opcional, para emulador local podría necesitarse service account
+    if not firebase_admin._apps:  # Evitar reinicializar
+        firebase_admin.initialize_app()
     db: FirestoreClient = firestore.client()
     print("Firebase Admin SDK initialized successfully.")
 except Exception as e:
@@ -26,42 +28,43 @@ except Exception as e:
     db = None
 
 
-# --- Transactional Helper for Counter ---
+# --- Transactional Helper for Counter (sin cambios) ---
 @transactional
 def get_next_user_number(transaction: Transaction, counter_ref) -> int:
-    """Obtiene e incrementa el contador de usuarios de forma atómica."""
     snapshot = counter_ref.get(transaction=transaction)
     current_number = snapshot.get('current_number')
-    if current_number is None: current_number = 0 # Inicializa si no existe
+    if current_number is None: current_number = 0
     next_number = current_number + 1
     transaction.update(counter_ref, {'current_number': next_number})
     return next_number
 
 
-# --- Funciones para construir respuestas CORS ---
-# FUNCIONES IMPORTANTES
+# --- Funciones para construir respuestas CORS (sin cambios) ---
 def _build_cors_preflight_response():
-    # En Flask, se puedes crear una respuesta vacía y añadir cabeceras.
-    # Para https_fn.Response directamente:
     headers = {
         'Access-Control-Allow-Origin': ALLOWED_ORIGINS,
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS', # Métodos permitidos
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization', # Cabeceras permitidas
-        'Access-Control-Max-Age': '3600' # Cuánto tiempo el navegador puede cachear esta respuesta preflight
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Max-Age': '3600'
     }
-    return https_fn.Response(status=204, headers=headers) # 204 No Content
+    return https_fn.Response(status=204, headers=headers)
 
 
 def _add_cors_headers(response_data, status_code=200):
-    # Esta función ahora toma los datos y el código de estado,
-    # y construye un https_fn.Response con jsonify y cabeceras CORS.
-    # Nota: jsonify es de Flask. Si no se usa Flask, debemos usar json.dumps()
-    # y establecer Content-Type: application/json manualmente.
+    # Usando Flask para jsonify. Si no se usa Flask en el entorno de Cloud Functions,
+    # se debería usar json.dumps y establecer Content-Type manualmente.
+    # Para Firebase Functions, es común devolver un dict y la plataforma lo maneja,
+    # o construir https_fn.Response con json.dumps(response_data).
+    # Por simplicidad y consistencia con el código original, mantendremos jsonify
+    # asumiendo que el entorno de ejecución de Firebase lo maneja o que Flask está disponible.
+    # Si no, esto necesitaría un ajuste a:
+    # import json
+    # body = json.dumps(response_data)
+    # headers = {'Access-Control-Allow-Origin': ALLOWED_ORIGINS, 'Content-Type': 'application/json'}
+    # return https_fn.Response(response=body, status=status_code, headers=headers)
 
-    # Si response_data no es ya un string JSON (como lo sería con jsonify().data)
-    # lo convertimos. Asumiendo que response_data es un dict.
-    json_response_body = jsonify(response_data).data # .data retorna el string JSON de la respuesta Flask
-
+    # Código original que usa Flask jsonify:
+    json_response_body = jsonify(response_data).data
     headers = {
         'Access-Control-Allow-Origin': ALLOWED_ORIGINS,
         'Content-Type': 'application/json'
@@ -69,257 +72,324 @@ def _add_cors_headers(response_data, status_code=200):
     return https_fn.Response(response=json_response_body, status=status_code, headers=headers)
 
 
-# --- Cloud Function: registerUser ---
+# --- Cloud Function: registerUser (sin cambios significativos, ya guarda itemsCollected y lastPlayedTotem vacíos) ---
 @https_fn.on_request()
 def registerUser(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS':
         return _build_cors_preflight_response()
-
-    """Registra un nuevo usuario generando un UsuarioID único."""
     if db is None:
-        response_body = {"error": "Server Error", "message": "Firebase not initialized"}
-        return _add_cors_headers(response_body, 500)
-
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
     try:
         req_data = req.get_json(silent=True)
         if not req_data:
-            response_body = {"error": "Bad Request", "message": "Missing JSON body"}
-            return _add_cors_headers(response_body, 400)
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
 
         cedula = req_data.get('cedula')
         nombre = req_data.get('nombre')
         apellido = req_data.get('apellido')
 
         if not all([cedula, nombre, apellido]):
-            response_body = {"error": "Bad Request", "message": "Missing required fields (cedula, nombre, apellido)"}
-            return _add_cors_headers(response_body, 400)
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields"}, 400)
 
-        # Limpiar nombre para usar en UsuarioID (solo letras y números del primer nombre)
-        nombre_limpio = re.sub(r'\W+', '', nombre.lower().strip().split(' ')[0])
-        if not nombre_limpio: nombre_limpio = "usuario" # Fallback
-
-        if not (3 <= len(nombre.strip()) <= 80):
-            response_body = {"error": "Bad Request", "message": "Nombre debe tener entre 3 y 80 caracteres."}
-            return _add_cors_headers(response_body, 400)
-        if not (3 <= len(apellido.strip()) <= 80):
-            response_body = {"error": "Bad Request", "message": "Apellido debe tener entre 3 y 80 caracteres."}
-            return _add_cors_headers(response_body, 400)
-        if len(cedula.strip()) != 16:  # Validacion basica de cédula
-            response_body = {"error": "Bad Request", "message": "Cédula inválida."}
-            return _add_cors_headers(response_body, 400)
+        nombre_limpio = re.sub(r'\W+', '', nombre.lower().strip().split(' ')[0]) or "usuario"
+        if not (3 <= len(nombre.strip()) <= 80) or not (3 <= len(apellido.strip()) <= 80) or len(cedula.strip()) != 16:
+            return _add_cors_headers({"error": "Bad Request", "message": "Validation failed for fields"}, 400)
 
         users_ref = db.collection('users')
-
-        # 1. Verificar si la Cédula ya existe (Query) - ¡Importante para evitar duplicados!
-        cedula_query = users_ref.where('cedula', '==', cedula).limit(1).stream()
+        cedula_query = users_ref.where(filter=FieldFilter('cedula', '==', cedula)).limit(1).stream()
         if next(cedula_query, None):
-            response_body = {"error": "Conflict", "message": f"User with Cedula {cedula} already exists"}
-            return _add_cors_headers(response_body, 409)
+            return _add_cors_headers({"error": "Conflict", "message": f"User with Cedula {cedula} already exists"}, 409)
 
-        # 2. Obtener el siguiente número (transaccional)
         counter_doc_ref = db.collection('counters').document('user_counter')
-        try:
-            next_number = get_next_user_number(db.transaction(), counter_doc_ref)
-        except Exception as counter_error:
-             print(f"ERROR getting next user number: {counter_error}")
-             response_body = {"error": "Internal Server Error", "message": "Could not generate user number"}
-             return _add_cors_headers(response_body, 500)
-
-        # 3. Generar UsuarioID
+        next_number = get_next_user_number(db.transaction(), counter_doc_ref)
         usuario_id_generado = f"{nombre_limpio}-{next_number}"
-        # Posible verificación extra: ¿Ya existe este usuarioId generado? (Muy improbable pero posible)
-        # usuario_id_query = users_ref.where('usuarioId', '==', usuario_id_generado).limit(1).stream()
-        # if next(usuario_id_query, None):
-        #     # Lógica de reintento o error si hay colisión (extremadamente raro con contador)
-        #     print(f"WARNING: usuarioId collision detected for {usuario_id_generado}")
-        #     return https_fn.Response("Internal Server Error: usuarioId collision", status=500)
 
-
-        # 4. Crear el nuevo documento de usuario (con ID automático de Firestore)
         new_user_data = {
-            'nombre': nombre,
-            'apellido': apellido,
-            'cedula': cedula,
-            'usuarioId': usuario_id_generado, # El ID generado para login
-            'puntos': 0,
-            'itemsCollected': [],
-            'lastPlayedTotem': {}
+            'nombre': nombre, 'apellido': apellido, 'cedula': cedula,
+            'usuarioId': usuario_id_generado, 'puntos': 0,
+            'itemsCollected': [],  # Inicializa como array vacío
+            'lastPlayedTotem': {}  # Inicializa como mapa vacío
         }
-        update_time, new_doc_ref = users_ref.add(new_user_data) # add() genera ID automático
-
-        response_body = {
-            "firestoreId": new_doc_ref.id,
-            "usuarioId": usuario_id_generado, # Devuelve el ID para que el usuario lo use en login
+        _update_time, new_doc_ref = users_ref.add(new_user_data)
+        return _add_cors_headers({
+            "firestoreId": new_doc_ref.id, "usuarioId": usuario_id_generado,
             "message": "User registered successfully"
-        }
-        # Usa jsonify de Flask para convertir dict a JSON correctamente
-        return _add_cors_headers(response_body, 201)
-
+        }, 201)
     except Exception as e:
         print(f"ERROR in registerUser: {e}")
-        # import traceback; print(traceback.format_exc()) # Para debug detallado
         return _add_cors_headers({"error": "Internal Server Error"}, 500)
 
 
-# --- Cloud Function: loginUser ---
+# --- Cloud Function: loginUser (sin cambios) ---
 @https_fn.on_request()
 def loginUser(req: https_fn.Request) -> https_fn.Response:
-    if req.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    """Autentica un usuario buscando su **usuarioId**."""
-    if db is None:
-        response_body = {"error": "Server Error", "message": "Firebase not initialized"}
-        return _add_cors_headers(response_body, 500)
-
+    if req.method == 'OPTIONS': return _build_cors_preflight_response()
+    if db is None: return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
     try:
         req_data = req.get_json(silent=True)
-        if not req_data:
-            response_body = {"error": "Bad Request", "message": "Missing JSON body"}
-            return _add_cors_headers(response_body, 400)
-
-        # ** El usuario envía 'usuarioId' para login **
+        if not req_data: return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
         usuario_id_login = req_data.get('usuarioId')
-        if not usuario_id_login:
-            response_body = {"error": "Bad Request", "message": "Missing usuarioId field for login"}
-            return _add_cors_headers(response_body, 400)
+        if not usuario_id_login: return _add_cors_headers({"error": "Bad Request", "message": "Missing usuarioId"}, 400)
 
         users_ref = db.collection('users')
-        # Buscar el usuario por el campo 'usuarioId'
-        query = users_ref.where('usuarioId', '==', usuario_id_login).limit(1)
+        query = users_ref.where(filter=FieldFilter('usuarioId', '==', usuario_id_login)).limit(1)
         results = query.stream()
-        user_doc = next(results, None) # Obtiene el primer documento que coincida o None
+        user_doc = next(results, None)
 
         if not user_doc:
-            response_body = {"error": "Not Found", "message": f"User with UsuarioID '{usuario_id_login}' not found"}
-            return _add_cors_headers(response_body, 404)
-
+            return _add_cors_headers({"error": "Not Found", "message": f"User '{usuario_id_login}' not found"}, 404)
         user_data = user_doc.to_dict()
-        # Devolver los datos necesarios para el estado del frontend
-        response_body = {
-            "firestoreId": user_doc.id, # El ID interno de Firestore
-            "usuarioId": user_data.get("usuarioId"), # El ID que usó para login
-            "nombre": user_data.get("nombre"),
-            "apellido": user_data.get("apellido"),
+        return _add_cors_headers({
+            "firestoreId": user_doc.id, "usuarioId": user_data.get("usuarioId"),
+            "nombre": user_data.get("nombre"), "apellido": user_data.get("apellido"),
             "puntos": user_data.get("puntos", 0),
-            "itemsCollected": user_data.get("itemsCollected", []),
-            "lastPlayedTotem": user_data.get("lastPlayedTotem", {})
-        }
-        # Usa jsonify de Flask para convertir dict a JSON correctamente
-        return _add_cors_headers(response_body, 200)
-
+            "itemsCollected": user_data.get("itemsCollected", []),  # Asegurar que siempre se devuelva
+            "lastPlayedTotem": user_data.get("lastPlayedTotem", {})  # Asegurar que siempre se devuelva
+        }, 200)
     except Exception as e:
         print(f"ERROR in loginUser: {e}")
-        # import traceback; print(traceback.format_exc())
         return _add_cors_headers({"error": "Internal Server Error"}, 500)
 
 
-# --- Cloud Function: getTriviaQuestion ---
+# --- Cloud Function: getTriviaQuestion (REFINADA) ---
 @https_fn.on_request()
 def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS':
         return _build_cors_preflight_response()
-
     if db is None:
-        response_body = {"error": "Server Error", "message": "Firebase not initialized"}
-        return _add_cors_headers(response_body, 500)
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
 
     try:
         req_data = req.get_json(silent=True)
         if not req_data:
-            response_body = {"error": "Bad Request", "message": "Missing JSON body"}
-            return _add_cors_headers(response_body, 400)
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
 
-        user_firestore_id = req_data.get('userFirestoreId') # Usaremos el ID de documento de Firestore del usuario
-        qr_code_data = req_data.get('qrCodeData') # El dato leído del QR del tótem
+        user_firestore_id = req_data.get('userFirestoreId')
+        qr_code_data = req_data.get('qrCodeData')
 
         if not all([user_firestore_id, qr_code_data]):
-            response_body = {"error": "Bad Request", "message": "Missing userFirestoreId or qrCodeData"}
-            return _add_cors_headers(response_body, 400)
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing userFirestoreId or qrCodeData"}, 400)
 
-        # 1. Obtener datos del usuario
         user_doc_ref = db.collection('users').document(user_firestore_id)
         user_doc = user_doc_ref.get()
         if not user_doc.exists:
-            response_body = {"error": "Not Found", "message": "User not found"}
-            return _add_cors_headers(response_body, 404)
-
+            return _add_cors_headers({"error": "Not Found", "message": "User not found"}, 404)
         user_data = user_doc.to_dict()
 
-        # 2. Obtener datos del tótem y su categoría
         totems_ref = db.collection('totems')
-        totem_query = totems_ref.where('qrCodeData', '==', qr_code_data).limit(1).stream()
-        totem_doc = next(totem_query, None)
-        if not totem_doc:
-            response_body = {"error": "Not Found", "message": "Totem with specified QR data not found"}
-            return _add_cors_headers(response_body, 404)
-
-        totem_data = totem_doc.to_dict()
-        totem_id = totem_doc.id # ID del documento del tótem
+        totem_query = totems_ref.where(filter=FieldFilter('qrCodeData', '==', qr_code_data)).limit(1).stream()
+        totem_doc_snapshot = next(totem_query, None)
+        if not totem_doc_snapshot:
+            return _add_cors_headers({"error": "Not Found", "message": "Totem with specified QR data not found"}, 404)
+        totem_data = totem_doc_snapshot.to_dict()
+        totem_id = totem_doc_snapshot.id  # ID del documento del tótem
         category = totem_data.get('category')
         if not category:
-            response_body = {"error": "Server Error", "message": "Totem has no category assigned"}
-            return _add_cors_headers(response_body, 500)
+            return _add_cors_headers({"error": "Server Error", "message": "Totem has no category assigned"}, 500)
 
-        # 3. Verificar lógica "Espera 5 minutos"
-        last_played_totem_info = user_data.get('lastPlayedTotem', {}).get(totem_id)
-        if last_played_totem_info:
-            last_attempt_time_str = last_played_totem_info.get('timestamp')
-            attempt_was_correct = last_played_totem_info.get('attemptCorrect', True) # TODO: Por el momento, asumir correcto si no está
+        # Verificar lógica "Espera 5 minutos" (REFINADA)
+        # Usamos totem_id como clave en lastPlayedTotem
+        last_played_info_for_this_totem = user_data.get('lastPlayedTotem', {}).get(totem_id)
+        if last_played_info_for_this_totem:
+            last_attempt_timestamp_str = last_played_info_for_this_totem.get('timestamp')
+            # El cooldown aplica si el último intento NO fue correcto.
+            # Si fue correcto, el usuario ya no debería poder jugar otra pregunta de este tótem
+            # hasta que se resetee o se complete la categoría (manejado por filtro de answered_correctly_ids).
+            # Aquí, el cooldown es específicamente para reintentos fallidos.
+            attempt_was_correct = last_played_info_for_this_totem.get('attemptCorrect',
+                                                                      True)  # Default true para no bloquear si el campo falta
 
-            if last_attempt_time_str and not attempt_was_correct:
-                # Convertir timestamp string (ISO format) a datetime object
-                last_attempt_time = datetime.datetime.fromisoformat(last_attempt_time_str)
-                current_time = datetime.datetime.now(datetime.timezone.utc) # Usar UTC
-                time_difference = current_time - last_attempt_time
+            if last_attempt_timestamp_str and not attempt_was_correct:  # Cooldown si el último intento fue INCORRECTO
+                try:
+                    # Asumiendo que el timestamp es un string ISO UTC o un objeto datetime de Firestore
+                    if isinstance(last_attempt_timestamp_str, str):
+                        last_attempt_time = datetime.datetime.fromisoformat(
+                            last_attempt_timestamp_str.replace("Z", "+00:00"))
+                    elif isinstance(last_attempt_timestamp_str, datetime.datetime):  # Firestore Timestamp
+                        last_attempt_time = last_attempt_timestamp_str.replace(
+                            tzinfo=datetime.timezone.utc)  # Asegurar UTC
+                    else:  # Tipo desconocido
+                        raise ValueError("Invalid timestamp format in lastPlayedTotem")
 
-                if time_difference.total_seconds() < 300: # 300 segundos = 5 minutos
-                    response_body = {
-                        "status": "wait",
-                        "message": "Debes esperar 5 minutos para volver a intentar en este tótem.",
-                        "cooldown_seconds_left": int(300 - time_difference.total_seconds())
-                    }
-                    return _add_cors_headers(response_body, 429) # Too Many Requests (o un código custom)
+                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    time_difference_seconds = (current_time - last_attempt_time).total_seconds()
+                    cooldown_period_seconds = 300  # 5 minutos
 
-        # 4. Obtener preguntas de la categoría
+                    if time_difference_seconds < cooldown_period_seconds:
+                        return _add_cors_headers({
+                            "status": "wait",
+                            "message": "Debes esperar para volver a intentar en este tótem.",
+                            "cooldown_seconds_left": int(cooldown_period_seconds - time_difference_seconds)
+                        }, 200)  # 200 con status 'wait', o 429 si prefieres
+                except ValueError as ve:
+                    print(f"Timestamp parsing error for totem {totem_id}, user {user_firestore_id}: {ve}")
+                    # Continuar sin cooldown si hay error de parseo, o manejar de otra forma
+
         trivias_ref = db.collection('trivias')
-        category_questions_query = trivias_ref.where('category', '==', category).stream()
+        category_questions_query = trivias_ref.where(filter=FieldFilter('category', '==', category)).stream()
         all_category_questions = {doc.id: doc.to_dict() for doc in category_questions_query}
-
         if not all_category_questions:
-            response_body = {"status": "no_questions_found", "message": f"No hay trivias para la categoría '{category}'."}
-            return _add_cors_headers(response_body, 404)
+            return _add_cors_headers(
+                {"status": "no_questions_found", "message": f"No trivias for category '{category}'"}, 200)
 
-        # 5. Filtrar preguntas ya respondidas correctamente por el usuario
-        answered_correctly_ids = set()
+        # Filtrar preguntas ya respondidas CORRECTAMENTE (REFINADO)
+        answered_correctly_trivia_ids = set()
+        # Iterar sobre itemsCollected y verificar que cada item es un diccionario
         for item in user_data.get('itemsCollected', []):
-            if item.get('answeredCorrectly') and item.get('totemId') == totem_id: # O solo item.get('triviaId')
-                answered_correctly_ids.add(item.get('triviaId'))
+            if isinstance(item, dict) and item.get('answeredCorrectly') and item.get('triviaId'):
+                # Adicionalmente, podríamos querer filtrar por totemId si una misma trivia
+                # pudiera aparecer en varios tótems y queremos que se pueda responder una vez por tótem.
+                # Por ahora, si una triviaId se respondió correctamente en cualquier parte, no se repite.
+                # if item.get('totemId') == totem_id:
+                answered_correctly_trivia_ids.add(item.get('triviaId'))
+            elif not isinstance(item, dict):
+                print(f"WARN: Invalid item found in itemsCollected for user {user_firestore_id}: {item}")
 
         available_questions = {
-            qid: qdata for qid, qdata in all_category_questions.items() if qid not in answered_correctly_ids
+            qid: qdata for qid, qdata in all_category_questions.items() if qid not in answered_correctly_trivia_ids
         }
 
         if not available_questions:
-            response_body = {"status": "category_completed", "message": f"¡Felicidades! Has completado todas las trivias de la categoría '{category}' en este tótem."}
-            return _add_cors_headers(response_body, 200)
+            return _add_cors_headers({"status": "category_completed",
+                                      "message": f"¡Felicidades! Has completado las trivias de '{category}'."}, 200)
 
-        # 6. Seleccionar una pregunta aleatoria de las disponibles
         selected_question_id = random.choice(list(available_questions.keys()))
         selected_question_data = available_questions[selected_question_id]
 
-        # 7. Preparar y devolver la pregunta (sin la respuesta correcta)
-        response_question = {
-            "triviaId": selected_question_id,
-            "category": selected_question_data.get('category'),
+        return _add_cors_headers({
+            "triviaId": selected_question_id, "category": selected_question_data.get('category'),
             "questionText": selected_question_data.get('questionText'),
             "options": selected_question_data.get('options'),
-            "totemId": totem_id # Enviar el ID del tótem para referencia
-        }
-
-        return _add_cors_headers(response_question, 200)
+            "totemId": totem_id
+        }, 200)
 
     except Exception as e:
         print(f"ERROR in getTriviaQuestion: {e}")
-        import traceback; print(traceback.format_exc())
-        return _add_cors_headers({"error": "Internal Server Error"}, 500)
+        import traceback;
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+# --- Cloud Function: submitTriviaAnswer (NUEVA IMPLEMENTACIÓN) ---
+@https_fn.on_request()
+def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    try:
+        req_data = req.get_json(silent=True)
+        if not req_data:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
+
+        user_firestore_id = req_data.get('userFirestoreId')
+        trivia_id = req_data.get('triviaId')  # ID de la pregunta
+        selected_option_index = req_data.get('selectedOptionIndex')  # Índice de la opción seleccionada
+        totem_id = req_data.get('totemId')  # ID del tótem donde se jugó (enviado por getTriviaQuestion)
+        qr_code_data = req_data.get('qrCodeData')  # qrCodeData del tótem (enviado desde el frontend)
+
+        if not all([user_firestore_id, trivia_id, totem_id, qr_code_data]) or selected_option_index is None:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields"}, 400)
+
+        # Validar que selected_option_index sea un entero
+        try:
+            selected_option_index = int(selected_option_index)
+        except ValueError:
+            return _add_cors_headers({"error": "Bad Request", "message": "selectedOptionIndex must be an integer"}, 400)
+
+        # 1. Obtener datos del usuario y de la trivia
+        user_doc_ref = db.collection('users').document(user_firestore_id)
+        trivia_doc_ref = db.collection('trivias').document(trivia_id)
+
+        user_doc = user_doc_ref.get()
+        trivia_doc = trivia_doc_ref.get()
+
+        if not user_doc.exists:
+            return _add_cors_headers({"error": "Not Found", "message": "User not found"}, 404)
+        if not trivia_doc.exists:
+            return _add_cors_headers({"error": "Not Found", "message": "Trivia question not found"}, 404)
+
+        user_data = user_doc.to_dict()
+        trivia_data = trivia_doc.to_dict()
+
+        # 2. Verificar si esta trivia específica en este tótem ya fue intentada recientemente (opcional, pero buena idea)
+        # last_played_info = user_data.get('lastPlayedTotem', {}).get(totem_id, {})
+        # if last_played_info.get('triviaId') == trivia_id:
+        # Podría ser un reintento muy rápido, o ya se procesó.
+        # Considerar cómo manejar esto. Por ahora, permitimos el procesamiento.
+
+        # 3. Determinar si la respuesta es correcta
+        correct_answer_index = trivia_data.get('correctAnswerIndex')
+        is_correct = (selected_option_index == correct_answer_index)
+        points_gained = 0
+        message = ""
+
+        current_time_utc = datetime.datetime.now(datetime.timezone.utc)
+        current_time_iso = current_time_utc.isoformat()
+
+        if is_correct:
+            points_gained = 3  # O leer de configuración del tótem/trivia para "Golden Period"
+            message = "¡Respuesta Correcta!"
+
+            # Nuevo item para itemsCollected
+            collected_item_data = {
+                "triviaId": trivia_id,
+                "totemId": totem_id,
+                "qrCodeData": qr_code_data,  # Guardar el qrCodeData también
+                "category": trivia_data.get('category'),
+                "answeredCorrectly": True,
+                "timestamp": current_time_iso,  # O firestore.SERVER_TIMESTAMP
+                "pointsGained": points_gained
+            }
+
+            # Actualizar Firestore: sumar puntos y añadir a itemsCollected
+            user_doc_ref.update({
+                'puntos': firestore.Increment(points_gained),
+                'itemsCollected': firestore.ArrayUnion([collected_item_data]),
+                f'lastPlayedTotem.{totem_id}': {  # Actualizar el último intento para este tótem
+                    'timestamp': current_time_iso,
+                    'attemptCorrect': True,
+                    'triviaId': trivia_id
+                }
+            })
+        else:
+            points_gained = 0  # O incluso -1 si se penaliza
+            message = "Respuesta Incorrecta."
+            collected_item_data = None
+            # Actualizar Firestore: solo el último intento en el tótem para el cooldown
+            user_doc_ref.update({
+                f'lastPlayedTotem.{totem_id}': {
+                    'timestamp': current_time_iso,
+                    'attemptCorrect': False,
+                    'triviaId': trivia_id
+                }
+            })
+
+        # Obtener los puntos actualizados del usuario para devolverlos
+        # (Firestore.Increment es asíncrono en el backend inmediato,
+        # así que leemos de nuevo o calculamos)
+        # Para simplificar, recalculamos o asumimos que el frontend puede manejarlo.
+        # O mejor, leer el documento de nuevo después de la actualización si es crítico.
+        # Por ahora, devolvemos los puntos ganados y el frontend suma a su estado.
+
+        # Opcional: Leer de nuevo para obtener el total de puntos actualizado
+        # updated_user_doc = user_doc_ref.get()
+        # new_total_points = updated_user_doc.to_dict().get('puntos', user_data.get('puntos', 0) + points_gained)
+
+        new_total_points = user_data.get('puntos', 0) + points_gained  # Cálculo local para la respuesta
+
+        return _add_cors_headers({
+            "correct": is_correct,
+            "pointsGained": points_gained,
+            "newTotalPoints": new_total_points,  # El frontend usará esto para actualizar su store
+            "message": message,
+            # Opcional: devolver el item recolectado para que el frontend lo añada al store
+            "collectedItem": collected_item_data
+        }, 200)
+
+    except Exception as e:
+        print(f"ERROR in submitTriviaAnswer: {e}")
+        import traceback;
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
