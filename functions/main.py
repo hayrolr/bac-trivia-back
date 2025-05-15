@@ -11,6 +11,8 @@ from google.cloud.firestore_v1.base_query import FieldFilter  # Importar para qu
 
 from flask import Flask, request, jsonify  # Flask solo para jsonify si no se usa como router
 from firebase_functions import https_fn  # , options as fn_options # Para configurar CORS a nivel de función
+
+from functools import wraps
 import re
 
 # --- Configuración de CORS ---
@@ -39,6 +41,34 @@ def get_next_user_number(transaction: Transaction, counter_ref) -> int:
     next_number = current_number + 1
     transaction.update(counter_ref, {'current_number': next_number})
     return next_number
+
+
+# --- Helper para obtener el estado de la aplicación ---
+def get_app_status():
+    if db is None:
+        # Si la DB no está inicializada, asumimos que la app no está disponible
+        # o manejamos como un error crítico del sistema.
+        print("ERROR: DB not initialized in get_app_status. Defaulting to app inactive.")
+        return False
+    try:
+        status_doc_ref = db.collection('app_config').document('status')
+        status_doc = status_doc_ref.get()
+        if status_doc.exists:
+            return status_doc.to_dict().get('isAppActive', True) # Default a True si el campo falta
+        return True # Default a True si el documento de config no existe (app activa)
+    except Exception as e:
+        print(f"ERROR reading app status: {e}. Defaulting to app active.")
+        return True # En caso de error leyendo, default a True para no bloquear innecesariamente
+
+# --- Decorador para verificar el estado de la aplicación ---
+def check_app_active(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not get_app_status():
+            # Mensaje es opcional, el frontend manejará el mensaje principal
+            return _add_cors_headers({"error": "Service Unavailable", "message": "Application is currently disabled."}, 503)
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 # --- Funciones para construir respuestas CORS (sin cambios) ---
@@ -75,6 +105,7 @@ def _add_cors_headers(response_data, status_code=200):
 
 
 # --- Cloud Function: registerUser (sin cambios significativos, ya guarda itemsCollected y lastPlayedTotem vacíos) ---
+@check_app_active
 @https_fn.on_request()
 def registerUser(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS':
@@ -90,17 +121,17 @@ def registerUser(req: https_fn.Request) -> https_fn.Response:
         nombre = req_data.get('nombre')
         apellido = req_data.get('apellido')
 
-        if not all([cedula, nombre, apellido]):
-            return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields"}, 400)
+        if not nombre:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields: nombre"}, 400)
 
         nombre_limpio = re.sub(r'\W+', '', nombre.lower().strip().split(' ')[0]) or "usuario"
-        if not (3 <= len(nombre.strip()) <= 80) or not (3 <= len(apellido.strip()) <= 80) or len(cedula.strip()) != 16:
-            return _add_cors_headers({"error": "Bad Request", "message": "Validation failed for fields"}, 400)
+        # if not (3 <= len(nombre.strip()) <= 80) or not (3 <= len(apellido.strip()) <= 80) or len(cedula.strip()) != 16:
+        #     return _add_cors_headers({"error": "Bad Request", "message": "Validation failed for fields"}, 400)
 
         users_ref = db.collection('users')
-        cedula_query = users_ref.where(filter=FieldFilter('cedula', '==', cedula)).limit(1).stream()
-        if next(cedula_query, None):
-            return _add_cors_headers({"error": "Conflict", "message": f"User with Cedula {cedula} already exists"}, 409)
+        # cedula_query = users_ref.where(filter=FieldFilter('cedula', '==', cedula)).limit(1).stream()
+        # if next(cedula_query, None):
+        #     return _add_cors_headers({"error": "Conflict", "message": f"User with Cedula {cedula} already exists"}, 409)
 
         counter_doc_ref = db.collection('counters').document('user_counter')
         next_number = get_next_user_number(db.transaction(), counter_doc_ref)
@@ -123,6 +154,7 @@ def registerUser(req: https_fn.Request) -> https_fn.Response:
 
 
 # --- Cloud Function: loginUser (sin cambios) ---
+@check_app_active
 @https_fn.on_request()
 def loginUser(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS': return _build_cors_preflight_response()
@@ -154,6 +186,7 @@ def loginUser(req: https_fn.Request) -> https_fn.Response:
 
 
 # --- Cloud Function: getTriviaQuestion (REFINADA) ---
+@check_app_active
 @https_fn.on_request()
 def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS':
@@ -273,6 +306,7 @@ def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
 
 
 # --- Cloud Function: submitTriviaAnswer (NUEVA IMPLEMENTACIÓN) ---
+@check_app_active
 @https_fn.on_request()
 def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
     if req.method == 'OPTIONS':
@@ -486,4 +520,50 @@ def getUsersWithScores(req: https_fn.Request) -> https_fn.Response:
         print(f"ERROR in getUsersWithScores: {e}")
         import traceback
         traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+@https_fn.on_request()
+def setAppStatus(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    # TODO: Implementar autenticación de admin, si es necesario para mayor seguridad.
+    # Por ahora, estamos seguros que solo se llama desde el dashboard de admin ya protegido.
+
+    try:
+        req_data = req.get_json(silent=True)
+        if not req_data or 'isActive' not in req_data or not isinstance(req_data.get('isActive'), bool):
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing or invalid 'isActive' boolean field"}, 400)
+
+        is_active = req_data.get('isActive')
+        status_doc_ref = db.collection('app_config').document('status')
+        status_doc_ref.set({'isAppActive': is_active}, merge=True) # merge=True para crear si no existe o actualizar
+
+        return _add_cors_headers({"message": f"Application status set to {'active' if is_active else 'inactive'}."}, 200)
+
+    except Exception as e:
+        print(f"ERROR in setAppStatus: {e}")
+        import traceback
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+@https_fn.on_request()
+def getAppStatus(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS': # Manejar preflight para GET también
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    # TODO: Autenticación de admin si se considera que solo admins deben ver esto.
+    # Por ahora, es informativo.
+
+    try:
+        is_active = get_app_status() # Usar el helper ya creado
+        return _add_cors_headers({"isAppActive": is_active}, 200)
+    except Exception as e:
+        print(f"ERROR in getAppStatus: {e}")
         return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
