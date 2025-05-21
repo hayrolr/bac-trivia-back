@@ -567,3 +567,108 @@ def getAppStatus(req: https_fn.Request) -> https_fn.Response:
     except Exception as e:
         print(f"ERROR in getAppStatus: {e}")
         return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
+
+
+@https_fn.on_request()
+def updateUserFromAdmin(req: https_fn.Request) -> https_fn.Response:
+    if req.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    if db is None:
+        return _add_cors_headers({"error": "Server Error", "message": "Firebase not initialized"}, 500)
+
+    # TODO: Implementar autenticación/autorización de admin aquí si es necesario para mayor seguridad.
+    # Esta función solo debe ser accesible por administradores autenticados.
+    # Por ahora, la llamada proviene solamente desde un frontend de admin ya protegido.
+
+    try:
+        req_data = req.get_json(silent=True)
+        if not req_data:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
+
+        user_firestore_id = req_data.get('userFirestoreId')  # ID del documento del usuario a editar
+        new_nombre_raw = req_data.get('newNombre')
+
+        if not user_firestore_id or not new_nombre_raw:
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing userFirestoreId or newNombre"}, 400)
+
+        new_nombre = new_nombre_raw.strip()  # Limpiar espacios al inicio y final
+
+        if not (3 <= len(new_nombre) <= 80):  # Validar longitud del nuevo nombre
+            return _add_cors_headers(
+                {"error": "Bad Request", "message": "El nuevo nombre debe tener entre 3 y 80 caracteres."}, 400)
+
+        user_doc_ref = db.collection('users').document(user_firestore_id)
+        user_doc = user_doc_ref.get()
+
+        if not user_doc.exists:
+            return _add_cors_headers({"error": "Not Found", "message": "User not found"}, 404)
+
+        user_data = user_doc.to_dict()
+        current_usuario_id = user_data.get('usuarioId')
+        new_usuario_id_generado = current_usuario_id  # Por defecto, mantener el actual
+
+        # Solo proceder a cambiar usuarioId si el nombre base ha cambiado
+        # y si el usuarioId actual tiene el formato esperado "nombrebase-numero"
+        current_nombre_base_original = current_usuario_id.split('-')[0] if current_usuario_id and '-' in current_usuario_id else ""
+
+        new_nombre_limpio_base = re.sub(r'\W+', '', new_nombre.lower().split(' ')[0])
+        if not new_nombre_limpio_base:
+            new_nombre_limpio_base = "usuario"  # Fallback
+
+        if current_usuario_id and '-' in current_usuario_id and new_nombre_limpio_base != current_nombre_base_original:
+            id_parts = current_usuario_id.split('-')
+            numeric_part = id_parts[-1]  # Tomar la última parte después del último guion
+
+            is_numeric_part_valid = False
+            try:
+                int(numeric_part)  # Verificar si es realmente un número
+                is_numeric_part_valid = True
+            except ValueError:
+                print(
+                    f"WARNING: Numeric part '{numeric_part}' from usuarioId '{current_usuario_id}' is not a valid integer for user {user_firestore_id}.")
+                # Si no es un número válido, no intentamos reconstruir el usuarioId para evitar corrupción.
+                # Se podría optar por generar un error o simplemente no cambiar el usuarioId.
+
+            if is_numeric_part_valid:
+                temp_new_usuario_id = f"{new_nombre_limpio_base}-{numeric_part}"
+
+                # Verificar si el NUEVO usuarioId generado ya existe (excluyendo el usuario actual)
+                users_ref = db.collection('users')
+                existing_user_query = users_ref.where('usuarioId', '==', temp_new_usuario_id).limit(1).stream()
+                conflicting_user = next(existing_user_query, None)
+
+                if conflicting_user and conflicting_user.id != user_firestore_id:
+                    return _add_cors_headers({"error": "Conflict",
+                                              "message": f"El UsuarioID '{temp_new_usuario_id}' generado a partir del nuevo nombre ya existe para otro usuario."},
+                                             409)
+                else:
+                    new_usuario_id_generado = temp_new_usuario_id  # Asignar el nuevo ID si no hay conflicto
+            else:
+                # Mantener el new_usuario_id_generado como current_usuario_id si la parte numérica no es válida
+                print(
+                    f"INFO: Keeping usuarioId as '{current_usuario_id}' because numeric part was not valid or base name did not change significantly.")
+
+        # Preparar datos para la actualización
+        update_data = {'nombre': new_nombre}
+        if new_usuario_id_generado != current_usuario_id:  # Solo incluir usuarioId si realmente cambió
+            update_data['usuarioId'] = new_usuario_id_generado
+
+        user_doc_ref.update(update_data)
+
+        response_message = f"Usuario actualizado. Nombre: {new_nombre}"
+        if new_usuario_id_generado != current_usuario_id:
+            response_message += f", UsuarioID: {new_usuario_id_generado}"
+        else:
+            response_message += f" (UsuarioID sin cambios: {current_usuario_id})"
+
+        return _add_cors_headers({
+            "message": response_message,
+            "updatedNombre": new_nombre,
+            "updatedUsuarioId": new_usuario_id_generado
+        }, 200)
+
+    except Exception as e:
+        print(f"ERROR in updateUserFromAdmin: {e}")
+        import traceback;
+        traceback.print_exc()
+        return _add_cors_headers({"error": "Internal Server Error", "message": str(e)}, 500)
