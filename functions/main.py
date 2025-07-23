@@ -15,6 +15,10 @@ from firebase_functions import https_fn  # , options as fn_options # Para config
 from functools import wraps
 import re
 
+# --- Constants ---
+POINTS_PER_TRIVIA_CORRECT = 3
+POINTS_PER_GOLDEN_TRIVIA_CORRECT = 6
+
 # --- Configuración de CORS ---
 # fn_options.set_global_options(cors=fn_options.CorsOptions(cors_origins="*", cors_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]))
 # Alternativamente, manejar manualmente como ya está implementado:
@@ -117,35 +121,35 @@ def registerUser(req: https_fn.Request) -> https_fn.Response:
         if not req_data:
             return _add_cors_headers({"error": "Bad Request", "message": "Missing JSON body"}, 400)
 
-        cedula = req_data.get('cedula')
         nombre = req_data.get('nombre')
-        apellido = req_data.get('apellido')
+        apellido = req_data.get('apellido', '')
+        cedula = req_data.get('cedula', '')
 
         if not nombre:
-            return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields: nombre"}, 400)
+            return _add_cors_headers({"error": "Bad Request", "message": "Missing required field: nombre"}, 400)
 
-        nombre_limpio = re.sub(r'\W+', '', nombre.lower().strip().split(' ')[0]) or "usuario"
-        # if not (3 <= len(nombre.strip()) <= 80) or not (3 <= len(apellido.strip()) <= 80) or len(cedula.strip()) != 16:
-        #     return _add_cors_headers({"error": "Bad Request", "message": "Validation failed for fields"}, 400)
-
+        # Use the provided username directly, case-insensitive check
+        usuario_id = re.sub(r'\W+', '', nombre.lower().strip().split(' ')[0]) or "usuario"
         users_ref = db.collection('users')
-        # cedula_query = users_ref.where(filter=FieldFilter('cedula', '==', cedula)).limit(1).stream()
-        # if next(cedula_query, None):
-        #     return _add_cors_headers({"error": "Conflict", "message": f"User with Cedula {cedula} already exists"}, 409)
+        # Case-insensitive check for existing username
+        existing_users_query = users_ref.where(filter=FieldFilter('usuarioId', '==', usuario_id)).limit(1).stream()
 
-        counter_doc_ref = db.collection('counters').document('user_counter')
-        next_number = get_next_user_number(db.transaction(), counter_doc_ref)
-        usuario_id_generado = f"{nombre_limpio}-{next_number}"
+        if next(existing_users_query, None):
+            return _add_cors_headers({"error": "Conflict", "message": "Este Usuario ya existe... por favor, usa uno diferente"}, 409)
 
         new_user_data = {
-            'nombre': nombre, 'apellido': apellido, 'cedula': cedula,
-            'usuarioId': usuario_id_generado, 'puntos': 0,
-            'itemsCollected': [],  # Inicializa como array vacío
-            'lastPlayedTotem': {}  # Inicializa como mapa vacío
+            'nombre': nombre,
+            'apellido': apellido,
+            'cedula': cedula,
+            'usuarioId': usuario_id,
+            'puntos': 0,
+            'itemsCollected': [],
+            'lastPlayedTotem': {}
         }
         _update_time, new_doc_ref = users_ref.add(new_user_data)
         return _add_cors_headers({
-            "firestoreId": new_doc_ref.id, "usuarioId": usuario_id_generado,
+            "firestoreId": new_doc_ref.id,
+            "usuarioId": usuario_id,
             "message": "User registered successfully"
         }, 201)
     except Exception as e:
@@ -248,14 +252,14 @@ def getTriviaQuestion(req: https_fn.Request) -> https_fn.Response:
 
                     current_time = datetime.datetime.now(datetime.timezone.utc)
                     time_difference_seconds = (current_time - last_attempt_time).total_seconds()
-                    cooldown_period_seconds = 300  # 5 minutos
+                    cooldown_period_seconds = 3  # 3 seconds
 
                     if time_difference_seconds < cooldown_period_seconds:
                         return _add_cors_headers({
                             "status": "wait",
                             "message": "Debes esperar para volver a intentar en este tótem.",
                             "cooldown_seconds_left": int(cooldown_period_seconds - time_difference_seconds)
-                        }, 200)  # 200 con status 'wait', o 429 si prefieres
+                        }, 200)  # 200 con status 'wait', o 429 si se prefiere
                 except ValueError as ve:
                     print(f"Timestamp parsing error for totem {totem_id}, user {user_firestore_id}: {ve}")
                     # Continuar sin cooldown si hay error de parseo, o manejar de otra forma
@@ -324,6 +328,7 @@ def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
         selected_option_index = req_data.get('selectedOptionIndex')  # Índice de la opción seleccionada
         totem_id = req_data.get('totemId')  # ID del tótem donde se jugó (enviado por getTriviaQuestion)
         qr_code_data = req_data.get('qrCodeData')  # qrCodeData del tótem (enviado desde el frontend)
+        is_golden = req_data.get('isGolden', False)  # New field
 
         if not all([user_firestore_id, trivia_id, totem_id, qr_code_data]) or selected_option_index is None:
             return _add_cors_headers({"error": "Bad Request", "message": "Missing required fields"}, 400)
@@ -365,7 +370,7 @@ def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
         current_time_iso = current_time_utc.isoformat()
 
         if is_correct:
-            points_gained = 3  # O leer de configuración del tótem/trivia para "Golden Period"
+            points_gained = POINTS_PER_GOLDEN_TRIVIA_CORRECT if is_golden else POINTS_PER_TRIVIA_CORRECT
             message = "¡Respuesta Correcta!"
 
             # Nuevo item para itemsCollected
@@ -376,7 +381,8 @@ def submitTriviaAnswer(req: https_fn.Request) -> https_fn.Response:
                 "category": trivia_data.get('category'),
                 "answeredCorrectly": True,
                 "timestamp": current_time_iso,  # O firestore.SERVER_TIMESTAMP
-                "pointsGained": points_gained
+                "pointsGained": points_gained,
+                "isGolden": is_golden
             }
 
             # Actualizar Firestore: sumar puntos y añadir a itemsCollected
