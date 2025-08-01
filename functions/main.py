@@ -36,7 +36,7 @@ except Exception as e:
     db = None
 
 
-# --- Transactional Helper for Counter (sin cambios) ---
+# --- Transactional Helper for Counter (no longer used for usernames) ---
 @transactional
 def get_next_user_number(transaction: Transaction, counter_ref) -> int:
     snapshot = counter_ref.get(transaction=transaction)
@@ -108,7 +108,7 @@ def _add_cors_headers(response_data, status_code=200):
     return https_fn.Response(response=json_response_body, status=status_code, headers=headers)
 
 
-# --- Cloud Function: registerUser (sin cambios significativos, ya guarda itemsCollected y lastPlayedTotem vacíos) ---
+# --- Cloud Function: registerUser (MODIFIED) ---
 @check_app_active
 @https_fn.on_request()
 def registerUser(req: https_fn.Request) -> https_fn.Response:
